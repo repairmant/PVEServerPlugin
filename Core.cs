@@ -127,18 +127,25 @@ namespace PVEServerPlugin
            _processThread = new Thread(PluginProcessing);
            _processThread.Start();
             if (NexusDetected) return;
-            var data = File.ReadAllText(ConflictDataPath);
-            if (!string.IsNullOrEmpty(data))
-            {
-                ConflictPairModule.ConflictPairs =
-                    JsonConvert.DeserializeObject<HashSet<ConflictPairModule.ConflictPairData>>(
-                        File.ReadAllText(ConflictDataPath));
-            }
-
+            ConflictPairModule.LoadConflictData(ConflictDataPath);
 
             MySession.Static.Factions.FactionCreated += FactionsOnFactionCreated;
+            MySession.Static.Factions.FactionStateChanged += FactionsOnFactionStateChanged;
             RecheckReputations();
 
+        }
+
+        private void FactionsOnFactionStateChanged(MyFactionStateChange action, long fromFactionId, long toFactionId, long playerId, long senderId)
+        {
+            if (action != MyFactionStateChange.RemoveFaction) return;
+            try
+            {
+                ConflictPairModule.OnFactionRemoved(fromFactionId);
+            }
+            catch (Exception e)
+            {
+                Log.Error(e, "Failed to clean up conflicts of removed faction");
+            }
         }
 
         private void PluginProcessing()
@@ -200,11 +207,12 @@ namespace PVEServerPlugin
             {
                 if (fac.FactionId == obj) continue;
                 MySession.Static.Factions.SetReputationBetweenFactions(obj, fac.FactionId, MySession.Static.Factions.ClampReputation(0));
-                Task.Run(() =>
+                var otherId = fac.FactionId;
+                Task.Run(async () =>
                 {
-                    Thread.Sleep(100);
-                    _factionStateChangeRequest(MyFactionStateChange.AcceptPeace, obj, fac.FactionId, 0);
-
+                    await Task.Delay(100);
+                    // network events must be raised from the game thread
+                    await Torch.InvokeAsync(() => RequestFactionChange(MyFactionStateChange.AcceptPeace, obj, otherId, 0));
                 });
             }
         }
@@ -225,24 +233,13 @@ namespace PVEServerPlugin
                 var playerFaction = MySession.Static.Factions.GetPlayerFaction(player.IdentityId);
                 foreach (var faction in playerFactions)
                 {
-                    var relation =
-                        MySession.Static.Factions.GetRelationBetweenPlayerAndFaction(player.IdentityId,
-                            faction.FactionId);
-                    if (relation == null  ||  !MySession.Static.Factions.HasRelationWithPlayer(player.IdentityId,faction.FactionId)) continue;
+                    if (!MySession.Static.Factions.HasRelationWithPlayer(player.IdentityId,faction.FactionId)) continue;
                     count++;
-                    if (MySession.Static.Factions.GetRelationBetweenPlayerAndFaction(player.IdentityId,faction.FactionId) == null)
-                        if (!Config.Instance.EnableConflict ||
-                            !ConflictPairModule.InConflict(playerFaction.FactionId, faction.FactionId,
-                                out var foundPair) ||
-                            foundPair.CurrentConflictState == ConflictPairModule.ConflictState.PendingConflict)
-                        {
-                            SetReputationBetweenPlayerAndFaction(player.IdentityId,faction.FactionId,0);
-                            continue;
-                        }
-                    
-                    SetReputationBetweenPlayerAndFaction(player.IdentityId, faction.FactionId,
-                        -500);
-
+                    // Upstream re-checked "relation == null" right after skipping nulls, so everyone got -500.
+                    var atWar = Config.Instance.EnableConflict && playerFaction != null &&
+                                ConflictPairModule.InConflict(playerFaction.FactionId, faction.FactionId,
+                                    ConflictPairModule.ConflictType.Faction, out _);
+                    SetReputationBetweenPlayerAndFaction(player.IdentityId, faction.FactionId, atWar ? -500 : 0);
                 }
             }
             Log.Warn($"{count} reputation changes made");
@@ -260,7 +257,21 @@ namespace PVEServerPlugin
         public static void RequestFactionChange(MyFactionStateChange action, long fromFactionId, long toFactionId,
             long playerId)
         {
-            _factionStateChangeRequest(action, fromFactionId, toFactionId, playerId);
+            try
+            {
+                if (_factionStateChangeRequest == null)
+                {
+                    var method = typeof(MyFactionCollection).GetMethod("SendFactionChange",
+                        System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static);
+                    _factionStateChangeRequest = (Action<MyFactionStateChange, long, long, long>)
+                        Delegate.CreateDelegate(typeof(Action<MyFactionStateChange, long, long, long>), method);
+                }
+                _factionStateChangeRequest(action, fromFactionId, toFactionId, playerId);
+            }
+            catch (Exception e)
+            {
+                Instance?.Log.Error(e, $"Faction state change {action} {fromFactionId}->{toFactionId} failed");
+            }
         }
     }
 }

@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using NLog;
 using PVEServerPlugin.Modules;
 using Sandbox.Game.Entities;
@@ -28,9 +28,18 @@ namespace PVEServerPlugin
 
         private static void ProcessDamage(object target, ref MyDamageInformation info)
         {
-            if (!Config.Instance.EnablePlugin) return;
+            if (ShouldZeroDamage(target, info.AttackerId)) info.Amount = 0;
+        }
+
+        /// <summary>
+        /// The PVE rule: true when damage from attackerId to target must be nullified.
+        /// Shared by the server damage handler and DamageSyncPatch, which stops the raw hit from being
+        /// broadcast to clients before the server handler zeroes it.
+        /// </summary>
+        internal static bool ShouldZeroDamage(object target, long attackerId)
+        {
+            if (!Config.Instance.EnablePlugin) return false;
             long id;
-            var attackerId = info.AttackerId;
             switch (target)
             {
                 case MySlimBlock block:
@@ -40,13 +49,13 @@ namespace PVEServerPlugin
                         foreach (var zone in Config.Instance.PvpZones)
                         {
                             if (!zone.IsWithinZoneRadius(block.CubeGrid)) continue;
-                            return;
+                            return false;
                         }
                     }
 
                     break;
                 case MyCharacter _:
-                    return;
+                    return false;
                 case MyCubeGrid grid:
                     id =  grid.BigOwners.Count > 0 ? grid.BigOwners[0]:0;
                     if (Config.Instance.PvpZones?.Count > 0)
@@ -54,7 +63,7 @@ namespace PVEServerPlugin
                         foreach (var zone in Config.Instance.PvpZones)
                         {
                             if (!zone.IsWithinZoneRadius(grid)) continue;
-                            return;
+                            return false;
                         }
                     }
 
@@ -69,7 +78,7 @@ namespace PVEServerPlugin
             {
 
                 if (attacker is MyVoxelBase)
-                    return;
+                    return false;
 
                 if (attacker is MyCubeBlock block)
                 {
@@ -117,26 +126,27 @@ namespace PVEServerPlugin
                 }
             }
 
-            if (id == 0 || MySession.Static.Players.IdentityIsNpc(id) || MySession.Static.Players.IdentityIsNpc(attackerId) || id == attackerId) return;
+            if (id == 0 || MySession.Static.Players.IdentityIsNpc(id) || MySession.Static.Players.IdentityIsNpc(attackerId) || id == attackerId) return false;
 
-            if (attackerId == 0 && Config.Instance.EnableNoOwner)return;
+            if (attackerId == 0 && Config.Instance.EnableNoOwner) return false;
 
 
             var attackerSteamId = MySession.Static.Players.TryGetSteamId(attackerId);
             var targetSteamId = MySession.Static.Players.TryGetSteamId(id);
 
-            if (ConflictPairModule.InConflict(attackerId,id, out var foundPair) && (foundPair == null || foundPair.CurrentConflictState == ConflictPairModule.ConflictState.Active)) return;
+            // attackerId and id are player identities; AreAtWar resolves their factions for faction wars.
+            if (ConflictPairModule.AreAtWar(attackerId, id)) return false;
 
             if (Config.Instance.EnableFactionDamage)
             {
                 var fac1 = MySession.Static.Factions.TryGetPlayerFaction(attackerId);
                 var fac2 = MySession.Static.Factions.TryGetPlayerFaction(id);
 
-                if (fac2 != null && fac1 != null && fac2 == fac1) return;
-            } 
+                if (fac2 != null && fac1 != null && fac2 == fac1) return false;
+            }
 
-            if (attackerSteamId == targetSteamId)return;
-            info.Amount = 0;        
+            if (attackerSteamId == targetSteamId) return false;
+            return true;
         }
 
     }
