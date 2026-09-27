@@ -75,8 +75,7 @@ namespace PVEServerPlugin.Patches
                 if (firstOwnerFaction != null && secondOwnerFaction != null &&
                     firstOwnerFaction == secondOwnerFaction) return true;
             }
-            return ConflictPairModule.InConflict(firstOwner,secondOwner, out var foundPair) 
-                   && (foundPair == null || foundPair.CurrentConflictState == ConflictPairModule.ConflictState.Active);
+            return ConflictPairModule.AreAtWar(firstOwner, secondOwner);
         }
 
         private static long TryGetOwner(MyCubeGrid grid)
